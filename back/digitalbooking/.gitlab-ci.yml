@@ -1,0 +1,69 @@
+stages:
+  - build
+  - test
+  - package
+  - image
+  - deploy
+
+variables:
+  MAVEN_OPTS: -Dmaven.repo.local=.m2/repository
+  REPOSITORY_NAME: remo-digitalbooking-repo-dev
+  TEAM: remo
+
+cache:
+  paths:
+    - back/digitalbooking/.m2/repository
+    - back/digitalbooking/target
+
+build backend:
+  image: maven:3-jdk-11
+  stage: build
+  script:
+    - cd back/digitalbooking
+    - "mvn install -B"
+    - mvn compile
+
+test job:
+  image: maven:3-jdk-11
+  stage: test
+  script:
+    - cd back/digitalbooking
+    - "mvn install -B"
+    - mvn test #mvn clean test
+
+package job:
+  image: maven:3-jdk-11
+  stage: package
+  artifacts:
+    paths:
+      - back/digitalbooking/target/*.jar #target/consoleapp.jar
+  script:
+    - cd back/digitalbooking
+    - "mvn install -B"
+    - mvn package
+
+build docker image:
+  stage: image
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  services:
+    - docker:dind
+  before_script:
+    #- docker system prune
+    - amazon-linux-extras install docker
+    - aws --version
+    - docker --version
+  script:
+    - aws ecr get-login-password | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
+    - docker build -t $AWS_ECR_REGISTRY/$REPOSITORY_NAME:$TEAM-back-latest -t $AWS_ECR_REGISTRY/$REPOSITORY_NAME:$TEAM-back-$PARENT_PIPELINE_ID --cache-from $AWS_ECR_REGISTRY/$REPOSITORY_NAME:$TEAM-back-latest back/digitalbooking
+    - docker image ls
+    - docker push --all-tags $AWS_ECR_REGISTRY/$REPOSITORY_NAME
+    - echo $PARENT_PIPELINE_ID
+    - |
+      curl --location --request PUT --header "PRIVATE-TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN" \
+      --silent --output /dev/null --show-error --fail \
+      "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/variables/BACKEND_VERSION" --form "value=`echo $PARENT_PIPELINE_ID`"
+  variables:
+    DOCKER_DRIVER: overlay
+    DOCKER_HOST: tcp://docker:2375

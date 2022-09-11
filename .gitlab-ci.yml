@@ -1,0 +1,185 @@
+include: cancel_pipeline_functions.yml
+
+variables:
+  APP_VERSION: $CI_PIPELINE_IID
+  REPOSITORY_NAME: remo-digitalbooking-repo-dev
+  TEAM: remo
+  LOCK: deployment
+  APP_NAME: remo-digitalbooking-dev
+  APP_ENV_NAME: remo-digitalbooking-env-dev
+
+stages:
+  - update
+  - cancel if update
+  - provision
+  - build
+  - deploy
+  - redeploy
+
+# update token:
+#   stage: update
+#   image:
+#     name: amazon/aws-cli
+#     entrypoint: [""]
+#   before_script:
+#     - aws --version
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "schedule"
+#   script:
+#     - USER=AWS
+#     - TOKEN=$(aws ecr get-login-password --region us-west-1)
+#     - AUTH=$(echo "$USER:$TOKEN" | base64 | tr -d "\n")
+#     - |
+#       curl --location --request PUT --header "PRIVATE-TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN" \
+#       --silent --output /dev/null --show-error --fail \
+#       "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/variables/AWS_ECR_AUTH" --form "value=$AUTH"
+
+update token:
+  stage: update
+  services:
+    - docker:dind
+  image: docker:stable
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_BUILDKIT: 1
+  script:
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+    - export TOKEN=$GITLAB_PERSONAL_ACCESS_TOKEN
+    - export PROJECT_ID=$CI_PROJECT_ID
+    - export AWS_ECR_REGISTRY=$AWS_ECR_REGISTRY
+    - apk add --no-cache curl jq bash
+    - chmod +x ./aws_auth.sh
+    - bash ./aws_auth.sh
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+avoid remaining:
+  stage: cancel if update
+  extends: .cancel_pipeline_template
+  script:
+    - echo "This job will cancel the pipeline"
+    - cancel_pipeline
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+infrastructure:
+  stage: provision
+  trigger:
+    include: infra/.gitlab-ci.yml
+    strategy: depend
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule" && ($CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_BRANCH == "develop")
+      when: always
+      changes:
+        - infra/**/**
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      when: manual
+      changes:
+        - infra/**/**
+      allow_failure: true
+
+frontend:
+  stage: build
+  trigger:
+    include: front/proyecto/.gitlab-ci.yml
+    strategy: depend
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule" && ($CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_BRANCH == "develop")
+      when: always
+      changes:
+        - front/**/**
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      when: manual
+      changes:
+        - front/**/**
+      allow_failure: true
+  variables:
+    PARENT_PIPELINE_ID: $APP_VERSION
+
+backend:
+  stage: build
+  trigger:
+    include: back/digitalbooking/.gitlab-ci.yml
+    strategy: depend
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule" && ($CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_BRANCH == "develop")
+      when: always
+      changes:
+        - back/**/**
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      when: manual
+      changes:
+        - back/**/**
+      allow_failure: true
+  variables:
+    PARENT_PIPELINE_ID: $APP_VERSION
+
+deploy to production:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:2.4.11
+    entrypoint: [""]
+  variables:
+    APP_NAME: remo-digitalbooking-dev
+    APP_ENV_NAME: remo-digitalbooking-env-dev
+  environment: production
+  resource_group: ${LOCK}
+  before_script:
+    - aws --version
+    - yum install -y gettext
+    - yum install -y zip
+    - yum install -y grep
+  script:
+    - envsubst < eb-templates/docker-compose.yml > docker-compose.yml
+    - envsubst < eb-templates/Dockerrun.aws.json > Dockerrun.aws.json
+    - envsubst < eb-templates/.dockercfg > .dockercfg
+    - cat docker-compose.yml
+    - cat Dockerrun.aws.json
+    - cat .dockercfg
+    - zip remo-digitalbooking-eb-app-dev-$APP_VERSION.zip docker-compose.yml Dockerrun.aws.json
+    - aws s3 cp .dockercfg s3://$AWS_S3_BUCKET/remo/digitalbooking/dev/.dockercfg
+    - aws s3 cp remo-digitalbooking-eb-app-dev-$APP_VERSION.zip s3://$AWS_S3_BUCKET/remo/digitalbooking/dev/remo-digitalbooking-eb-app-dev-$APP_VERSION.zip
+    - aws elasticbeanstalk create-application-version --application-name $APP_NAME --version-label $APP_VERSION --source-bundle S3Bucket=$AWS_S3_BUCKET,S3Key=remo/digitalbooking/dev/remo-digitalbooking-eb-app-dev-$APP_VERSION.zip
+    - aws elasticbeanstalk update-environment --application-name $APP_NAME --version-label $APP_VERSION --environment-name $APP_ENV_NAME
+    - aws elasticbeanstalk wait environment-updated --application-name $APP_NAME --version-label $APP_VERSION --environment-name $APP_ENV_NAME
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule" && ($CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_BRANCH == "develop")
+      changes:
+        - front/**/**
+        - back/**/**
+      when: on_success
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      changes:
+        - front/**/**
+        - back/**/**
+      when: manual
+
+save succeded version:
+  stage: redeploy
+  when: on_success
+  script:
+    - |
+      curl --location --request PUT --header "PRIVATE-TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN" \
+      --silent --output /dev/null --show-error --fail \
+      "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/variables/VERSION_OK" --form "value=$APP_VERSION"
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      changes:
+        - front/**/**
+        - back/**/**
+
+redeploy if failure:
+  image:
+    name: amazon/aws-cli:2.4.11
+    entrypoint: [""]
+  stage: redeploy
+  when: on_failure
+  script:
+    - aws elasticbeanstalk update-environment --application-name $APP_NAME --version-label $VERSION_OK --environment-name $APP_ENV_NAME
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+      changes:
+        - front/**/**
+        - back/**/**

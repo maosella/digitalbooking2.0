@@ -1,0 +1,21 @@
+version: '3.8'
+services:
+  frontend:
+    container_name: frontend-$FRONTEND_VERSION
+    ports:
+      - "80:80"
+      - "443:443"
+    image: "$AWS_ECR_REGISTRY/$REPOSITORY_NAME:$TEAM-front-$FRONTEND_VERSION"
+    # networks:
+    #   - fullstack
+    # links:
+    #   - backend
+  backend:
+    container_name: backend-$BACKEND_VERSION
+    ports:
+      - "8080:8080"
+    image: "$AWS_ECR_REGISTRY/$REPOSITORY_NAME:$TEAM-back-$BACKEND_VERSION"
+    # networks:
+    #   - fullstack
+# networks:
+#   fullstack:
